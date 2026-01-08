@@ -1,0 +1,178 @@
+---
+- name: Linux Hardening Baseline (Enforce) — no firewall here
+  hosts: linux_hosts
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    # Users & keys
+    - name: Ensure admin users exist with sudo
+      user:
+        name: "{{ item.name }}"
+        shell: "{{ item.shell | default('/bin/bash') }}"
+        groups: "{{ item.groups | default(['sudo']) }}"
+        append: true
+        create_home: true
+        password: "{{ item.hashed_password | default(omit) }}"
+      loop: "{{ admin_users }}"
+      tags: ['users']
+
+    - name: Install authorized_keys for each admin
+      authorized_key:
+        user: "{{ item.name }}"
+        state: present
+        key: "{{ item.ssh_public_key }}"
+      when: item.ssh_public_key | length > 0
+      loop: "{{ admin_users }}"
+      tags: ['users']
+
+    - name: Remove temporary user 'david'
+      user:
+        name: david
+        state: absent
+        remove: yes
+      tags: ['users']
+
+    # SSH hardening
+    - name: Ensure PermitRootLogin no
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\s*PermitRootLogin\s+'
+        line: 'PermitRootLogin no'
+        create: yes
+        backup: yes
+      tags: ['ssh']
+
+    - name: Configure PasswordAuthentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\s*PasswordAuthentication\s+'
+        line: "PasswordAuthentication {{ 'yes' if ssh_password_auth else 'no' }}"
+        create: yes
+      tags: ['ssh']
+
+    - name: Restrict SSH to admin users
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\s*AllowUsers\s+'
+        line: "AllowUsers {{ ssh_allow_users | join(' ') }}"
+        create: yes
+      tags: ['ssh']
+
+    - name: Restart sshd
+      service:
+        name: ssh
+        state: restarted
+      tags: ['ssh']
+
+    # Password policy
+    - name: Ensure libpam-pwquality installed
+      package:
+        name: libpam-pwquality
+        state: present
+      tags: ['auth']
+
+    - name: Set pwquality minlen
+      lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: '^\s*minlen\s*='
+        line: "minlen = {{ min_password_length }}"
+        create: yes
+      tags: ['auth']
+
+    - name: Enforce complexity credits
+      blockinfile:
+        path: /etc/security/pwquality.conf
+        block: |
+          ucredit = -1
+          lcredit = -1
+          dcredit = -1
+          ocredit = -1
+      tags: ['auth']
+
+    - name: Configure faillock
+      blockinfile:
+        path: /etc/security/faillock.conf
+        create: yes
+        block: |
+          deny = {{ lockout_denies }}
+          unlock_time = {{ lockout_time }}
+      tags: ['auth']
+
+    # Time sync
+    - name: Ensure chrony installed & enabled
+      package:
+        name: chrony
+        state: present
+      tags: ['time']
+
+    - name: Enable chrony
+      service:
+        name: chrony
+        enabled: yes
+        state: started
+      tags: ['time']
+
+    # Auto security updates
+    - name: Install unattended-upgrades
+      package:
+        name: unattended-upgrades
+        state: present
+      tags: ['patching']
+
+    - name: Enable unattended-upgrades
+      systemd:
+        name: unattended-upgrades
+        enabled: yes
+        state: started
+      tags: ['patching']
+
+    # AppArmor
+    - name: Ensure AppArmor installed
+      package:
+        name: apparmor
+        state: present
+      tags: ['apparmor']
+
+    - name: Enable AppArmor
+      systemd:
+        name: apparmor
+        enabled: yes
+        state: started
+      tags: ['apparmor']
+
+    # auditd
+    - name: Ensure auditd installed
+      package:
+        name: auditd
+        state: present
+      tags: ['logging']
+
+    - name: Enable auditd
+      service:
+        name: auditd
+        enabled: yes
+        state: started
+      tags: ['logging']
+
+    # Sysctl network hardening
+    - name: Ensure sysctl hardening
+      copy:
+        dest: /etc/sysctl.d/99-hardening.conf
+        content: |
+          net.ipv4.conf.all.accept_redirects = 0
+          net.ipv4.conf.default.accept_redirects = 0
+          net.ipv4.conf.all.send_redirects = 0
+          net.ipv4.conf.default.send_redirects = 0
+          net.ipv4.conf.all.accept_source_route = 0
+          net.ipv4.conf.default.accept_source_route = 0
+          net.ipv4.tcp_syncookies = 1
+          net.ipv6.conf.all.accept_redirects = 0
+          net.ipv6.conf.default.accept_redirects = 0
+      tags: ['sysctl']
+
+    - name: Reload sysctl
+      command: sysctl --system
+      tags: ['sysctl']

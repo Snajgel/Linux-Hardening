@@ -1,0 +1,145 @@
+---
+- name: Linux Hardening Audit (Read-Only)
+  hosts: linux_hosts
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    audit_results: []
+  tags: ['audit']
+
+  tasks:
+    # UID0 and sudo sanity
+    - name: Check UID 0 accounts
+      shell: "awk -F: '$3==0{print $1}' /etc/passwd | xargs"
+      register: uid0_accounts
+      changed_when: false
+      tags: ['users']
+
+    - set_fact:
+        audit_results: "{{ audit_results + [{
+          'control': 'UID0 single account',
+          'result': (uid0_accounts.stdout.split() | length) == 1,
+          'details': 'UID0: ' + (uid0_accounts.stdout | default(''))
+        }] }}"
+      tags: ['users']
+
+    - name: Validate sudoers syntax
+      command: visudo -cf /etc/sudoers
+      register: visudo_check
+      changed_when: false
+      failed_when: false
+      tags: ['users']
+
+    - set_fact:
+        audit_results: "{{ audit_results + [{
+          'control': 'Sudoers valid',
+          'result': visudo_check.rc == 0,
+          'details': visudo_check.stderr | default('OK')
+        }] }}"
+      tags: ['users']
+
+    # SSH checks
+    - name: Read sshd_config
+      slurp:
+        path: /etc/ssh/sshd_config
+      register: sshd
+      failed_when: false
+      changed_when: false
+      tags: ['ssh']
+
+    - set_fact:
+        sshd_lines: "{{ (sshd.content | default('') | b64decode).splitlines() | map('trim') | list }}"
+      tags: ['ssh']
+
+    - set_fact:
+        audit_results: "{{ audit_results + [{
+          'control': 'SSH PermitRootLogin no',
+          'result': (sshd_lines | select('match','^\s*PermitRootLogin\s+no\b') | list | length) > 0,
+          'details': 'expected PermitRootLogin no'
+        }] }}"
+      tags: ['ssh']
+
+    - set_fact:
+        audit_results: "{{ audit_results + [{
+          'control': 'SSH key-only auth',
+          'result': (not (vars['ssh_password_auth'] | bool)) and ((sshd_lines | select('match','^\s*PasswordAuthentication\s+no\b') | list | length) > 0) or (vars['ssh_password_auth'] | bool),
+          'details': 'PasswordAuthentication should be no when key-only is required'
+        }] }}"
+      tags: ['ssh']
+
+    # Audit firewall presence (read-only)
+    - name: Detect firewall
+      shell: |
+        if systemctl is-active --quiet ufw; then echo ufw;             elif command -v nft >/dev/null 2>&1 && nft list ruleset >/dev/null 2>&1; then echo nftables;             elif iptables -S >/dev/null 2>&1; then echo iptables;             else echo none; fi
+      register: fw_detect
+      changed_when: false
+      tags: ['firewall']
+
+    - set_fact:
+        audit_results: "{{ audit_results + [{
+          'control': 'Firewall present',
+          'result': (fw_detect.stdout.strip() != 'none') or (not require_firewall),
+          'details': 'detected=' ~ fw_detect.stdout.strip()
+        }] }}"
+      tags: ['firewall']
+
+    # auditd presence
+    - name: auditd status
+      command: auditctl -s
+      register: auditctl_out
+      changed_when: false
+      failed_when: false
+      tags: ['logging']
+
+    - set_fact:
+        audit_results: "{{ audit_results + [{
+          'control': 'auditd running',
+          'result': (auditctl_out.rc == 0) or (not require_auditd),
+          'details': auditctl_out.stdout | default('not running')
+        }] }}"
+      tags: ['logging']
+
+    # Updates check (Debian/Ubuntu)
+    - name: Debian/Ubuntu updates check
+      command: apt-get -s upgrade
+      register: apt_upgrade
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "Debian"
+      tags: ['patching']
+
+    - set_fact:
+        audit_results: "{{ audit_results + [{
+          'control': 'Security updates pending (Debian)',
+          'result': (apt_upgrade.stdout is search('0 upgraded, 0 newly installed, 0 to remove')),
+          'details': (apt_upgrade.stdout | regex_search('^(.*)$', multiline=True) | list | first | default('see apt-get -s upgrade'))
+        }] }}"
+      when: ansible_facts.os_family == "Debian" and apt_upgrade is defined
+      tags: ['patching']
+
+    # Tiny HTML report on target
+    - name: Build HTML report on target
+      copy:
+        dest: /tmp/linux_audit_report.html
+        mode: "0644"
+        content: |
+          <html><head><meta charset="utf-8"><title>Linux Audit Report</title>
+          <style>body{font-family:Arial} .pass{color:green} .fail{color:red}</style>
+          </head><body>
+          <h2>Linux Audit Report</h2>
+          <ul>
+          {% for r in audit_results %}
+            <li><span class="{{ 'pass' if r.result else 'fail' }}">{{ r.control }}: {{ 'PASS' if r.result else 'FAIL' }}</span> — {{ r.details | default('') }}</li>
+          {% endfor %}
+          </ul>
+          </body></html>
+      tags: ['audit']
+
+    # Console summary
+    - name: Show audit summary
+      debug:
+        msg: "{{ item.control }} => {{ 'PASS' if item.result else 'FAIL' }} | {{ item.details | default('') }}"
+      loop: "{{ audit_results }}"
+      tags: ['audit']

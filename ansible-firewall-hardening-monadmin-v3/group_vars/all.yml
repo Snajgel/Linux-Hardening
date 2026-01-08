@@ -1,0 +1,17 @@
+admin_cidrs:
+
+world_ports:
+
+admin_ports:
+
+monitoring_access_cidrs:
+
+monadmin_keys_human: []
+
+monadmin_automation_pubkey: ""
+
+ansible_controller_cidrs: []
+
+monadmin_disable_password_auth: true
+
+monadmin_disable_root_login: true

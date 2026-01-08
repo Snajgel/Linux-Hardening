@@ -1,0 +1,56 @@
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+  chain input {
+    type filter hook input priority 0;
+    policy drop;
+
+    iif lo accept
+    ct state established,related accept
+
+    {% if admin_cidrs is defined and admin_cidrs is iterable %}
+    {% for cidr in admin_cidrs %}
+    ip saddr {{ cidr }} tcp dport 22 accept
+    {% endfor %}
+    {% endif %}
+
+    {% set monitored_ports = ["3000/tcp", "9090/tcp", "9115/tcp"] %}
+    {% if monitoring_access_cidrs is defined and monitoring_access_cidrs is iterable %}
+    {% for port in monitored_ports %}
+      {% for cidr in monitoring_access_cidrs %}
+    ip saddr {{ cidr }} tcp dport {{ port.split('/')[0] }} accept
+      {% endfor %}
+    {% endfor %}
+    {% endif %}
+
+    {% if admin_ports is defined and admin_ports is iterable and admin_cidrs is iterable %}
+    {% for port in admin_ports %}
+      {% if port not in monitored_ports %}
+        {% for cidr in admin_cidrs %}
+    ip saddr {{ cidr }} tcp dport {{ port.split('/')[0] }} accept
+        {% endfor %}
+      {% endif %}
+    {% endfor %}
+    {% endif %}
+
+    {% if world_ports is defined and world_ports is iterable %}
+    {% for port in world_ports %}
+    tcp dport {{ port.split('/')[0] }} accept
+    {% endfor %}
+    {% endif %}
+
+    ct state invalid drop
+  }
+
+  chain forward {
+    type filter hook forward priority 0;
+    policy drop;
+  }
+
+  chain output {
+    type filter hook output priority 0;
+    policy accept;
+  }
+}

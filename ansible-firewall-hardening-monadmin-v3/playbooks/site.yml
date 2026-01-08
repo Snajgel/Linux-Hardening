@@ -1,0 +1,32 @@
+---
+- name: Phase 1 — Users/SSH (monadmin + keys)
+  hosts: all
+  become: true
+  serial: 1
+  tasks:
+    - name: Include users play
+      ansible.builtin.import_playbook: users.yml
+
+- name: Phase 2 — Hardening (AUDIT)
+  hosts: all
+  become: true
+  serial: 1
+  tasks:
+    - name: Include hardening audit
+      ansible.builtin.import_playbook: hardening/audit.yml
+
+- name: Phase 3 — Hardening (ENFORCE)
+  hosts: all
+  become: true
+  serial: 1
+  tasks:
+    - name: Include hardening enforce
+      ansible.builtin.import_playbook: hardening/enforce.yml
+
+- name: Phase 4 — Firewall
+  hosts: all
+  become: true
+  serial: 1
+  tasks:
+    - name: Include firewall
+      ansible.builtin.import_playbook: firewall.yml

@@ -1,0 +1,158 @@
+---
+- name: Create/lockdown monadmin (human + automation)
+  hosts: all
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    admin_group_debian: sudo
+    admin_group_redhat: wheel
+    sudo_passwordless_cmds:
+      - /usr/bin/apt
+      - /usr/bin/apt-get
+      - /usr/bin/dpkg
+      - /bin/systemctl
+      - /usr/sbin/service
+      - /usr/sbin/ufw
+      - /sbin/iptables-restore
+      - /usr/sbin/sysctl
+      - /usr/bin/tee
+      - /usr/bin/cp
+      - /usr/bin/mv
+      - /usr/bin/rm
+      - /usr/bin/sed
+
+  tasks:
+    - name: Determine admin group based on OS
+      ansible.builtin.set_fact:
+        admin_group: "{{ admin_group_debian if ansible_facts['os_family'] == 'Debian' else admin_group_redhat }}"
+
+    - name: Ensure admin group exists
+      ansible.builtin.group:
+        name: "{{ admin_group }}"
+        state: present
+
+    - name: Ensure monadmin user exists and is in admin group
+      ansible.builtin.user:
+        name: monadmin
+        groups: "{{ admin_group }}"
+        append: true
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Install human keys from variables
+      ansible.posix.authorized_key:
+        user: monadmin
+        state: present
+        key: "{{ item }}"
+      loop: "{{ monadmin_keys_human | default([]) }}"
+
+    - name: Install any files/ssh/monadmin*.pub (supports .pem -> .pub converted)
+      ansible.posix.authorized_key:
+        user: monadmin
+        state: present
+        key: "{{ lookup('file', item) }}"
+      loop: "{{ lookup('ansible.builtin.fileglob', '../files/ssh/monadmin*.pub', wantlist=True) }}"
+      loop_control:
+        label: "{{ item | basename }}"
+
+    - name: Install automation key for monadmin (restricted)
+      ansible.posix.authorized_key:
+        user: monadmin
+        state: present
+        key: "{{ monadmin_automation_pubkey }}"
+        key_options: >-
+          {{ ('from=\"' ~ (ansible_controller_cidrs | join(',')) ~ '\",' ) if (ansible_controller_cidrs | length > 0) else '' }}
+          no-agent-forwarding,no-port-forwarding,no-X11-forwarding
+      when: monadmin_automation_pubkey | length > 0
+
+    - name: Configure sudoers for monadmin (NOPASSWD only for common Ansible commands)
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/90-monadmin
+        mode: "0440"
+        content: |
+          Defaults:monadmin secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          Cmnd_Alias ANS_CMDS = {{ sudo_passwordless_cmds | join(", ") }}
+          monadmin ALL=(ALL) NOPASSWD: ANS_CMDS
+
+    - name: Harden SSH - disable root login (optional)
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin\s+'
+        line: 'PermitRootLogin no'
+        state: present
+        create: yes
+        backup: yes
+      when: monadmin_disable_root_login | bool
+      notify: Reload SSH
+
+    - name: Harden SSH - disable password authentication after keys confirmed
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication\s+'
+        line: 'PasswordAuthentication no'
+        state: present
+        create: yes
+        backup: yes
+      when: monadmin_disable_password_auth | bool
+      notify: Reload SSH
+
+    - name: Add per-user restrictions for automation key (Match block) if controller CIDRs defined
+      ansible.builtin.blockinfile:
+        path: /etc/ssh/sshd_config
+        marker: "# {mark} MONADMIN AUTOMATION MATCH"
+        block: |
+          Match User monadmin Address {{ ansible_controller_cidrs | join(',') }}
+            AuthenticationMethods publickey
+            PasswordAuthentication no
+            AllowTcpForwarding no
+            X11Forwarding no
+            PermitTunnel no
+      when: ansible_controller_cidrs | length > 0
+      notify: Reload SSH
+
+    
+    - name: Override cloud-init SSH config to enforce PasswordAuthentication no
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/99-password-disable.conf
+        content: |
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+        owner: root
+        group: root
+        mode: "0644"
+      when: monadmin_disable_password_auth | bool
+      notify: Reload SSH
+
+    - name: Comment out PasswordAuthentication in cloud-init config if present
+      ansible.builtin.replace:
+        path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+        regexp: '^PasswordAuthentication\s+yes'
+        replace: '# PasswordAuthentication yes'
+      when: monadmin_disable_password_auth | bool
+      notify: Reload SSH
+
+    - name: Verify final SSH PasswordAuthentication setting with sshd -T
+      ansible.builtin.command: sshd -T
+      register: sshd_config_check
+      changed_when: false
+
+    - name: Fail if PasswordAuthentication is not disabled
+      ansible.builtin.fail:
+        msg: |
+          PasswordAuthentication is still ENABLED in the final SSH config.
+          Please check include file order or manual overrides.
+      when: "'passwordauthentication no' not in sshd_config_check.stdout"
+
+
+    - name: Validate sshd config
+      ansible.builtin.command: /usr/sbin/sshd -t -f /etc/ssh/sshd_config
+      changed_when: false
+
+  handlers:
+    - name: Reload SSH
+      ansible.builtin.service:
+        name: "{{ 'ssh' if ansible_facts['os_family']=='Debian' else 'sshd' }}"
+        state: reloaded

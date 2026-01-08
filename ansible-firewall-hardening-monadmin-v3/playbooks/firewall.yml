@@ -1,0 +1,74 @@
+---
+- name: Configure nftables firewall using dynamic rules
+  hosts: all
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+
+  vars:
+    nftables_conf_path: /etc/nftables.conf
+
+  pre_tasks:
+    - name: Stop and disable UFW if present (prevent conflict)
+      ansible.builtin.service:
+        name: ufw
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: Stop and disable iptables-persistent if present
+      ansible.builtin.service:
+        name: netfilter-persistent
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: Uninstall iptables-persistent and netfilter-persistent packages
+      ansible.builtin.apt:
+        name:
+          - iptables-persistent
+          - netfilter-persistent
+        state: absent
+      ignore_errors: true
+
+    - name: Flush all iptables rules
+      ansible.builtin.command: iptables -F
+      ignore_errors: true
+
+    - name: Delete all iptables chains
+      ansible.builtin.command: iptables -X
+      ignore_errors: true
+
+  tasks:
+    - name: Install nftables
+      ansible.builtin.apt:
+        name: nftables
+        state: present
+        update_cache: true
+
+    - name: Enable and start nftables service
+      ansible.builtin.systemd:
+        name: nftables
+        enabled: true
+        state: started
+
+    - name: Render nftables ruleset
+      ansible.builtin.template:
+        src: nftables.conf.j2
+        dest: "{{ nftables_conf_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Apply nftables rules
+      ansible.builtin.command: "nft -f {{ nftables_conf_path }}"
+
+  post_tasks:
+    - name: Show active nftables ruleset
+      ansible.builtin.command: nft list ruleset
+      register: nft_ruleset
+      changed_when: false
+
+    - name: Display nftables ruleset
+      ansible.builtin.debug:
+        var: nft_ruleset.stdout_lines
