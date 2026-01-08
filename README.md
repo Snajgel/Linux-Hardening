@@ -29,7 +29,7 @@ ansible-playbook -i inventories/prod/inventory.ini playbooks/users.yml
 ssh -i ~/.ssh/yourkey user@IP
 
 # B) Enforce key-only auth
-#    Set name_disable_password_auth: true in group_vars/all.yml, then:
+# Set name_disable_password_auth: true in group_vars/all.yml, then:
 ansible-playbook -i inventories/prod/inventory.ini playbooks/users.yml
 
 # C) Hardening (your audit -> enforce)
