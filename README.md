@@ -1,4 +1,4 @@
-# Runbook: Firewall + Hardening with monadmin (key-only)
+# Runbook: Firewall + Hardening
 
 ## 0) Prepare
 ```bash
