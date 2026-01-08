@@ -15,7 +15,7 @@ ansible-galaxy collection install -r requirements.yml
 ## 2) Set networks
 Edit `group_vars/all.yml`:
 ```yaml
-admin_cidrs: ["203.0.113.0/24","198.51.100.10/32"]
+admin_cidrs: ["IP","IP"]
 world_ports: []       # keep empty unless needed
 admin_ports: ["22/tcp"]
 ```
